@@ -109,6 +109,41 @@ def test_stock_synthesis_mock():
     print("  ✓ OK\n")
 
 
+def test_transcription_mock():
+    if not sarvam_client.SARVAM_MOCK:
+        print("── Transcription (skipped: not in mock mode) ──\n")
+        return
+
+    print("── Transcription (mock) ──")
+    import os
+    fake_audio = b"\x00" * 5000   # fake audio bytes
+    transcript = sarvam_client.transcribe_audio(fake_audio, "en-IN")
+    assert isinstance(transcript, str) and len(transcript) > 0, "Empty transcript"
+    print("  Transcript:", transcript)
+    print("  ✓ OK\n")
+
+    # Each target language should return something
+    for code in ["hi-IN", "ta-IN", "te-IN"]:
+        t = sarvam_client.transcribe_audio(fake_audio, code)
+        assert t, f"Empty transcript for {code}"
+    print("  ✓ Multi-language mock OK\n")
+
+
+def test_synthesize_reply_mock():
+    if not sarvam_client.SARVAM_MOCK:
+        print("── Synthesize Reply (skipped) ──\n")
+        return
+
+    print("── Synthesize Reply (mock) ──")
+    # With cloned voice
+    audio = sarvam_client.synthesize_reply("mock_voice_123", "Hello there!", "en-IN")
+    assert len(audio) > 100
+    # Without cloned voice (stock fallback)
+    audio2 = sarvam_client.synthesize_reply(None, "Hello there!", "en-IN")
+    assert len(audio2) > 100
+    print("  ✓ OK\n")
+
+
 if __name__ == "__main__":
     print("=" * 50)
     print("Sarvam API Test Suite")
@@ -123,6 +158,8 @@ if __name__ == "__main__":
         test_voice_creation_mock,
         test_synthesis_mock,
         test_stock_synthesis_mock,
+        test_transcription_mock,
+        test_synthesize_reply_mock,
     ]
 
     passed = 0
@@ -138,5 +175,6 @@ if __name__ == "__main__":
     print("=" * 50)
     print(f"Results: {passed} passed, {failed} failed")
     print("=" * 50)
+    import sys
     sys.exit(1 if failed else 0)
 

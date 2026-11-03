@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import time
 import json
@@ -19,12 +20,17 @@ import coach
 import gamification
 import sarvam_client
 
-app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY")
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+app = Flask(
+    __name__,
+    template_folder=os.path.join(BASE_DIR, "templates"),
+    static_folder=os.path.join(BASE_DIR, "static"),
+)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or "sarvam-voice-coach-session-secret-key-32b"
 app.permanent_session_lifetime = timedelta(days=365)
 
 client = OpenAI(
-    api_key=os.environ.get("LLM_API_KEY"),
+    api_key=os.environ.get("LLM_API_KEY") or "placeholder",
     base_url=os.environ.get("LLM_BASE_URL"),
     timeout=30,
 )
@@ -135,7 +141,7 @@ def chat():
             model=MODEL,
             messages=messages,
             temperature=0.75,
-            max_tokens=500,
+            max_tokens=1000,
         )
         raw_reply = response.choices[0].message.content or ""
     except RateLimitError:
@@ -151,20 +157,19 @@ def chat():
         convo["history"].pop()
         return jsonify(error="Provider error ({}).".format(e.status_code)), 502
 
-    # BUG FIX: was "role": "user" — now correctly "assistant"
-    convo["history"].append({"role": "assistant", "content": raw_reply})
-
-    # Parse coach response for vocab cards
+    # Parse coach response for vocab cards and ensure clean normal speech
     result = {"reply": raw_reply, "vocab": []}
     xp_data = None
 
     if is_coach:
-        parsed = coach.parse_coach_response(raw_reply)
+        learner = db.get_learner(learner_id)
+        target_lang = learner.get("target_language", "hi-IN") if learner else "hi-IN"
+        parsed = coach.parse_coach_response(raw_reply, target_lang)
         result["reply"] = parsed["reply"]
         result["vocab"] = parsed["vocab"]
 
         # Award XP for chatting
-        tz = (db.get_learner(learner_id) or {}).get("timezone", "Asia/Kolkata")
+        tz = (learner or {}).get("timezone", "Asia/Kolkata")
         xp_data = gamification.award_xp(learner_id, "chat", tz)
         today = gamification.today_str(tz)
         gamification.track_quest(learner_id, today, "chat_messages")
@@ -176,6 +181,9 @@ def chat():
         result["level"] = xp_data.get("level", 1)
         result["level_up"] = xp_data.get("level_up", False)
         result["new_badges"] = gamification.format_badges(new_badges)
+
+    # Save clean normal message to history so subsequent turns stay natural
+    convo["history"].append({"role": "assistant", "content": result["reply"]})
 
     return jsonify(**result)
 
@@ -314,18 +322,52 @@ def delete_voice():
 # SPEAK (TTS with cloned voice)
 # ═══════════════════════════════════════════════════════════════
 
+def sanitize_text_for_tts(text: str) -> str:
+    """Prepare text for Sarvam TTS:
+    - Removes markdown symbols (*, _, `, #, ~, >)
+    - Strips parenthetical Latin/English transliterations (e.g. '(Mane raatribhojan...)')
+      so the voice synthesizer does NOT repeat the English/romanized version of the native sentence
+    - Strips explicit 'Romanized:' or 'Pronunciation:' lines
+    - Strips vocabulary blocks or tags
+    """
+    if not text:
+        return ""
+    t = re.sub(r'[*_`#~>]', '', text)
+    t = re.sub(r'(?i)\b(romanized|pronunciation|transliteration)\s*:\s*[^\n]+', '', t)
+    # Remove Latin/English transliterations in parentheses that accompany native script
+    t = re.sub(r'\s*\([A-Za-z0-9\s,\'’.\-?!/]+\)', '', t)
+    t = re.sub(r'---VOCAB---[\s\S]*$', '', t)
+    t = re.sub(r'\[VOCAB\][\s\S]*$', '', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+
 @app.route("/speak", methods=["POST"])
 def speak():
-    """Synthesize speech using the learner's cloned voice."""
+    """Synthesize speech using the learner's cloned voice (or stock voice).
+
+    mode='word'  — short vocab item, 100-char cap, awards hear_word XP
+    mode='reply' — full coach reply, 500-char cap, no XP (auto-read-back)
+    stock=true   — use the stock Sarvam voice regardless of mode
+    """
     data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()
     language_code = (data.get("language_code") or "").strip()
     use_stock = data.get("stock", False)
+    mode = data.get("mode", "word")   # "word" | "reply"
 
     if not text:
         return jsonify(error="No text provided."), 400
-    if len(text) > sarvam_client.MAX_WORD_CHARS:
-        return jsonify(error="Text too long (max {} chars).".format(sarvam_client.MAX_WORD_CHARS)), 400
+
+    # Clean speech text: remove markdown symbols, duplicate romanization parentheticals, etc.
+    cleaned = sanitize_text_for_tts(text)
+    if cleaned:
+        text = cleaned
+
+    char_limit = sarvam_client.MAX_REPLY_CHARS if mode == "reply" else sarvam_client.MAX_WORD_CHARS
+    if len(text) > char_limit:
+        text = text[:char_limit]   # silently truncate for reply mode
+
     if not sarvam_client.validate_language(language_code):
         return jsonify(error="Unsupported language."), 400
 
@@ -335,6 +377,10 @@ def speak():
     try:
         if use_stock:
             audio_b64 = sarvam_client.synthesize_stock(text, language_code)
+        elif mode == "reply":
+            # use cloned voice if enrolled, otherwise stock
+            voice_id = learner.get("voice_id") if learner else None
+            audio_b64 = sarvam_client.synthesize_reply(voice_id, text, language_code)
         else:
             if not learner or not learner.get("voice_id"):
                 return jsonify(error="Set up your voice first."), 400
@@ -342,14 +388,51 @@ def speak():
     except sarvam_client.SarvamError as e:
         return jsonify(error=str(e)), 502
 
-    # Award XP for hearing a word
-    if not use_stock:
+    # Award XP only for deliberate word listening (not auto-read-back)
+    if not use_stock and mode == "word":
         tz = learner.get("timezone", "Asia/Kolkata") if learner else "Asia/Kolkata"
         today = gamification.today_str(tz)
         gamification.award_xp(learner_id, "hear_word", tz)
         gamification.track_quest(learner_id, today, "hear_words")
 
     return jsonify(audio=audio_b64)
+
+
+# ═══════════════════════════════════════════════════════════════
+# TRANSCRIBE (STT — voice input)
+# ═══════════════════════════════════════════════════════════════
+
+@app.route("/transcribe", methods=["POST"])
+def transcribe():
+    """Transcribe a voice recording to text using Sarvam STT.
+
+    Accepts multipart form:
+      audio     — the audio file (webm/wav/etc.)
+      language  — BCP-47 language code the learner is SPEAKING in
+                  (almost always en-IN since they're asking in English)
+    Returns: {transcript: str}
+    """
+    if "audio" not in request.files:
+        return jsonify(error="No audio file provided."), 400
+
+    audio_file = request.files["audio"]
+    language = request.form.get("language", "en-IN")
+
+    if not sarvam_client.validate_language(language):
+        language = "en-IN"   # safe default
+
+    audio_bytes = audio_file.read()
+    if len(audio_bytes) < 100:
+        return jsonify(error="Recording too short."), 400
+    if len(audio_bytes) > 25 * 1024 * 1024:   # 25 MB hard cap
+        return jsonify(error="Recording too large (max 25 MB)."), 400
+
+    try:
+        transcript = sarvam_client.transcribe_audio(audio_bytes, language)
+    except sarvam_client.SarvamError as e:
+        return jsonify(error=str(e)), 502
+
+    return jsonify(transcript=transcript)
 
 
 # ═══════════════════════════════════════════════════════════════

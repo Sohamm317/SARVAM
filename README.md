@@ -120,6 +120,21 @@ Start the app and open http://127.0.0.1:5000:
 python app.py
 ```
 
+## Deploying to Vercel
+
+1. Push your code to GitHub (ensure `.env` and `*.txt` containing API keys remain uncommitted).
+2. Go to [Vercel](https://vercel.com) and click **Add New Project** -> import your GitHub repository.
+3. In **Project Settings** -> **Environment Variables**, add the variables from `.env.example`:
+   - `FLASK_SECRET_KEY`
+   - `LLM_BASE_URL`
+   - `LLM_API_KEY`
+   - `LLM_MODEL`
+   - `SARVAM_CLONE_API_KEY`
+   - `SARVAM_TTS_API_KEY`
+   - `SARVAM_BASE_URL` (https://api.sarvam.ai)
+   - `SARVAM_MOCK` (0 for production, 1 for mock)
+4. Click **Deploy**. Vercel will install from `requirements.txt` and route requests through `api/index.py` using `vercel.json`.
+
 ## Routes
 
 | Route | Method | Purpose |

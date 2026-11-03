@@ -82,7 +82,13 @@ CREATE TABLE IF NOT EXISTS daily_quests (
 
 
 def get_db_path():
-    return DATABASE_PATH
+    configured = os.environ.get("DATABASE_PATH")
+    if configured:
+        return configured
+    # Vercel serverless functions have a read-only filesystem except /tmp
+    if os.environ.get("VERCEL"):
+        return "/tmp/persona_chat.db"
+    return "persona_chat.db"
 
 
 def init_db():

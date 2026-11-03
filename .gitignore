@@ -1,7 +1,41 @@
+# Environment variables and secrets
 .env
-.vscode/
-__pycache__/
-*.pyc
+.env.local
+.env.*.local
+*.env
+!*.env.example
+!.env.example
+sarvam_api_key.txt
+*api_key*
+*.key
+*.secret
+
+# SQLite Databases & runtime storage
 *.db
+*.sqlite
+*.sqlite3
 audio_cache/
+
+# Vercel deployment cache & artifacts
+.vercel
+.vercel/
+
+# Python cache & build files
+__pycache__/
+*.py[cod]
+*$py.class
 *.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env_venv/
+
+# Editor files
+.vscode/
+.idea/
+.DS_Store
+*.swp
